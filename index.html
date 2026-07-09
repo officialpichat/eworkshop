@@ -614,8 +614,16 @@ function showMsg(box, text, type) {
 }
 
 /* ---------------- AUTH STATE ---------------- */
+let unsubOrders = null;
+let unsubUsers = null;
+
 onAuthStateChanged(auth, async (user) => {
   currentUser = user;
+  if (unsubOrders) { unsubOrders(); unsubOrders = null; }
+  if (unsubUsers) { unsubUsers(); unsubUsers = null; }
+  allOrders = [];
+  allUsers = [];
+
   if (user) {
     isAdmin = user.email && user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
     document.getElementById("loginBtn").style.display = "none";
@@ -625,6 +633,8 @@ onAuthStateChanged(auth, async (user) => {
       document.getElementById("cartBtn").style.display = "none";
       document.getElementById("myOrdersBtn").style.display = "none";
       document.getElementById("accountBtn").style.display = "none";
+      subscribeAdminOrders();
+      subscribeAdminUsers();
       showAdminPanel();
     } else {
       document.getElementById("adminPanelBtn").style.display = "none";
@@ -633,6 +643,7 @@ onAuthStateChanged(auth, async (user) => {
       document.getElementById("accountBtn").style.display = "flex";
       const udoc = await getDoc(doc(db, "users", user.uid));
       document.getElementById("accountName").textContent = udoc.exists() ? udoc.data().name.split(" ")[0] : "Account";
+      subscribeMyOrders(user.uid);
       showCustomerHome();
     }
   } else {
@@ -643,6 +654,7 @@ onAuthStateChanged(auth, async (user) => {
     document.getElementById("myOrdersBtn").style.display = "none";
     document.getElementById("accountBtn").style.display = "none";
     document.getElementById("cartBtn").style.display = "flex";
+    renderMyOrders();
     showCustomerHome();
   }
   updateCartBadge();
@@ -675,7 +687,7 @@ window.switchAdminTab = function(tab) {
   document.querySelector('.admin-sidebar .nav-item[data-tab="' + tab + '"]').classList.add("active");
 };
 
-/* ---------------- PRODUCTS: REALTIME LISTEN ---------------- */
+/* ---------------- PRODUCTS: REALTIME LISTEN (public, everyone can read) ---------------- */
 onSnapshot(query(collection(db, "products"), orderBy("createdAt", "desc")), (snap) => {
   allProducts = [];
   snap.forEach(d => allProducts.push({ id: d.id, ...d.data() }));
@@ -685,24 +697,49 @@ onSnapshot(query(collection(db, "products"), orderBy("createdAt", "desc")), (sna
   document.getElementById("statProducts").textContent = allProducts.length;
 });
 
-/* ---------------- ORDERS: REALTIME LISTEN (admin sees all) ---------------- */
-onSnapshot(query(collection(db, "orders"), orderBy("createdAt", "desc")), (snap) => {
-  allOrders = [];
-  snap.forEach(d => allOrders.push({ id: d.id, ...d.data() }));
-  renderAdminOrders();
-  renderRecentOrders();
-  renderMyOrders();
-  document.getElementById("statOrders").textContent = allOrders.length;
-  document.getElementById("statPending").textContent = allOrders.filter(o => o.status === "pending").length;
-});
+/* ---------------- ORDERS: ADMIN SEES ALL ORDERS ---------------- */
+function subscribeAdminOrders() {
+  unsubOrders = onSnapshot(
+    query(collection(db, "orders"), orderBy("createdAt", "desc")),
+    (snap) => {
+      allOrders = [];
+      snap.forEach(d => allOrders.push({ id: d.id, ...d.data() }));
+      renderAdminOrders();
+      renderRecentOrders();
+      document.getElementById("statOrders").textContent = allOrders.length;
+      document.getElementById("statPending").textContent = allOrders.filter(o => o.status === "pending").length;
+    },
+    (err) => { console.error("Admin orders error:", err); showToast("Orders load karne me error: " + err.message); }
+  );
+}
 
-/* ---------------- USERS: REALTIME LISTEN ---------------- */
-onSnapshot(collection(db, "users"), (snap) => {
-  allUsers = [];
-  snap.forEach(d => allUsers.push({ id: d.id, ...d.data() }));
-  renderAdminUsers();
-  document.getElementById("statUsers").textContent = allUsers.length;
-});
+/* ---------------- ORDERS: CUSTOMER SEES ONLY THEIR OWN ---------------- */
+function subscribeMyOrders(uid) {
+  unsubOrders = onSnapshot(
+    query(collection(db, "orders"), where("userId", "==", uid)),
+    (snap) => {
+      allOrders = [];
+      snap.forEach(d => allOrders.push({ id: d.id, ...d.data() }));
+      allOrders.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+      renderMyOrders();
+    },
+    (err) => { console.error("My orders error:", err); showToast("Aapke orders load karne me error: " + err.message); }
+  );
+}
+
+/* ---------------- USERS: ADMIN ONLY ---------------- */
+function subscribeAdminUsers() {
+  unsubUsers = onSnapshot(
+    collection(db, "users"),
+    (snap) => {
+      allUsers = [];
+      snap.forEach(d => allUsers.push({ id: d.id, ...d.data() }));
+      renderAdminUsers();
+      document.getElementById("statUsers").textContent = allUsers.length;
+    },
+    (err) => { console.error("Users error:", err); }
+  );
+}
 
 /* ---------------- CATEGORY BAR ---------------- */
 function renderCategories() {
@@ -901,21 +938,27 @@ function renderMyOrders() {
   const wrap = document.getElementById("myOrdersList");
   if (!wrap) return;
   if (!currentUser) { wrap.innerHTML = `<div class="empty-state">Login karein orders dekhne ke liye.</div>`; return; }
-  const myOrders = allOrders.filter(o => o.userId === currentUser.uid);
+  const myOrders = allOrders; // already filtered by subscribeMyOrders query
   if (myOrders.length === 0) { wrap.innerHTML = `<div class="empty-state"><div class="big">📦</div>Aapne abhi tak koi order nahi kiya.</div>`; return; }
   wrap.innerHTML = myOrders.map(o => `
     <div class="order-card">
       <div class="oc-head">
-        <div class="oc-id">Order ID: ${o.id.slice(0, 8).toUpperCase()}</div>
+        <div class="oc-id">Order ID: ${o.id.slice(0, 8).toUpperCase()}${o.createdAt ? " • " + new Date(o.createdAt.toDate()).toLocaleDateString("en-IN") : ""}</div>
         <span class="status-badge status-${o.status}">${statusLabel(o.status)}</span>
       </div>
-      ${o.items.map(i => `<div class="order-item-line">${escapeHtml(i.name)} x ${i.qty} — ₹${i.price * i.qty}</div>`).join("")}
+      ${o.status === "pending" ? `<div style="background:#fff4e0;color:#b8720a;font-size:12px;padding:8px 10px;border-radius:5px;margin-bottom:10px;">⏳ Aapka order admin ke paas confirmation ke liye gaya hai. Admin accept karte hi processing shuru ho jayegi.</div>` : ""}
+      ${o.items.map(i => `
+        <div style="display:flex;align-items:center;gap:10px;padding:6px 0;">
+          ${i.image ? `<img src="${i.image}" style="width:40px;height:40px;object-fit:contain;background:#fafafa;border-radius:5px;">` : `<div style="width:40px;height:40px;background:#fafafa;border-radius:5px;display:flex;align-items:center;justify-content:center;">🛍️</div>`}
+          <div class="order-item-line" style="padding:0;">${escapeHtml(i.name)} x ${i.qty} — ₹${i.price * i.qty}</div>
+        </div>`).join("")}
       <div style="margin-top:8px;font-size:13px;font-weight:700;">Total: ₹${o.total} (${o.paymentMethod === "cod" ? "Cash on Delivery" : "Online Payment"})</div>
     </div>`).join("");
 }
 function statusLabel(s) {
   return { pending: "Pending", accepted: "Accepted", shipped: "Shipped", delivered: "Delivered", cancelled: "Cancelled" }[s] || s;
 }
+
 
 /* ================= ADMIN: PRODUCTS ================= */
 let currentProductImages = [];   // already-uploaded image URLs (existing, for edit mode)

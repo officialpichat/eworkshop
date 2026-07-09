@@ -440,7 +440,13 @@
       <div class="form-group"><label>Stock (quantity)</label><input type="number" id="prodStock"></div>
     </div>
     <div class="form-group">
-      <label>Image URLs (multiple ke liye comma se separate karein)</label>
+      <label>Product Photos (apne device se upload karein, multiple select kar sakte hain)</label>
+      <input type="file" id="prodImageFiles" accept="image/*" multiple onchange="handleFileSelect(event)">
+      <div id="imagePreviewWrap" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;"></div>
+      <div id="uploadProgressMsg" style="font-size:12px;color:#1f7ae0;margin-top:6px;display:none;"></div>
+    </div>
+    <div class="form-group">
+      <label>Ya Image URL bhi daal sakte hain (optional, comma se separate karein)</label>
       <textarea id="prodImages" rows="2" placeholder="https://image1.jpg, https://image2.jpg"></textarea>
     </div>
     <div class="form-group"><label>Description</label><textarea id="prodDesc" rows="3"></textarea></div>
@@ -469,6 +475,9 @@ import {
   getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc,
   getDoc, getDocs, onSnapshot, query, where, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getStorage, ref, uploadBytes, getDownloadURL, deleteObject
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 /* =========================================================
    YAHA APNI FIREBASE PROJECT KI CONFIG DAALEIN
@@ -487,6 +496,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 const ADMIN_EMAIL = "pinkuchhimpa@gmail.com";
 const ADMIN_PASSWORD = "pinku@chhimpa";
@@ -908,9 +918,14 @@ function statusLabel(s) {
 }
 
 /* ================= ADMIN: PRODUCTS ================= */
+let currentProductImages = [];   // already-uploaded image URLs (existing, for edit mode)
+let pendingImageFiles = [];      // new files selected by admin, not yet uploaded
+
 window.openProductModal = function(id) {
   document.getElementById("productMsg").style.display = "none";
   document.getElementById("prodId").value = id || "";
+  document.getElementById("prodImageFiles").value = "";
+  pendingImageFiles = [];
   if (id) {
     const p = allProducts.find(x => x.id === id);
     document.getElementById("productModalTitle").textContent = "Product Edit Karein";
@@ -919,14 +934,76 @@ window.openProductModal = function(id) {
     document.getElementById("prodPrice").value = p.price || "";
     document.getElementById("prodMrp").value = p.mrp || "";
     document.getElementById("prodStock").value = p.stock || 0;
-    document.getElementById("prodImages").value = (p.images || []).join(", ");
+    document.getElementById("prodImages").value = "";
     document.getElementById("prodDesc").value = p.description || "";
+    currentProductImages = [...(p.images || [])];
   } else {
     document.getElementById("productModalTitle").textContent = "Naya Product Add Karein";
     ["prodName","prodCategory","prodPrice","prodMrp","prodStock","prodImages","prodDesc"].forEach(id2 => document.getElementById(id2).value = "");
+    currentProductImages = [];
   }
+  renderImagePreview();
   openModal("productOverlay");
 };
+
+window.handleFileSelect = function(event) {
+  const files = Array.from(event.target.files);
+  const maxSizeMB = 3;
+  for (const f of files) {
+    if (f.size > maxSizeMB * 1024 * 1024) {
+      showToast(f.name + " bahut badi file hai (max " + maxSizeMB + "MB).");
+      continue;
+    }
+    pendingImageFiles.push(f);
+  }
+  renderImagePreview();
+};
+
+function renderImagePreview() {
+  const wrap = document.getElementById("imagePreviewWrap");
+  let html = "";
+  currentProductImages.forEach((url, idx) => {
+    html += `<div style="position:relative;width:70px;height:70px;">
+      <img src="${url}" style="width:70px;height:70px;object-fit:cover;border-radius:6px;border:1px solid #ddd;">
+      <span onclick="removeExistingImage(${idx})" style="position:absolute;top:-6px;right:-6px;background:#e53e3e;color:#fff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;">&times;</span>
+    </div>`;
+  });
+  pendingImageFiles.forEach((file, idx) => {
+    const url = URL.createObjectURL(file);
+    html += `<div style="position:relative;width:70px;height:70px;">
+      <img src="${url}" style="width:70px;height:70px;object-fit:cover;border-radius:6px;border:2px solid #1f7ae0;">
+      <span onclick="removePendingImage(${idx})" style="position:absolute;top:-6px;right:-6px;background:#e53e3e;color:#fff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;">&times;</span>
+      <span style="position:absolute;bottom:0;left:0;right:0;background:rgba(31,122,224,.85);color:#fff;font-size:9px;text-align:center;">Naya</span>
+    </div>`;
+  });
+  wrap.innerHTML = html || `<div style="font-size:12px;color:#999;">Koi photo select nahi ki hai.</div>`;
+}
+window.removeExistingImage = function(idx) {
+  currentProductImages.splice(idx, 1);
+  renderImagePreview();
+};
+window.removePendingImage = function(idx) {
+  pendingImageFiles.splice(idx, 1);
+  renderImagePreview();
+};
+
+async function uploadPendingImages() {
+  const progressBox = document.getElementById("uploadProgressMsg");
+  const uploadedUrls = [];
+  for (let i = 0; i < pendingImageFiles.length; i++) {
+    const file = pendingImageFiles[i];
+    progressBox.style.display = "block";
+    progressBox.textContent = `Photo upload ho rahi hai... (${i + 1}/${pendingImageFiles.length})`;
+    const path = "products/" + Date.now() + "_" + i + "_" + file.name.replace(/[^a-zA-Z0-9.]/g, "_");
+    const storageRef = ref(storage, path);
+    await uploadBytes(storageRef, file);
+    const url = await getDownloadURL(storageRef);
+    uploadedUrls.push(url);
+  }
+  progressBox.style.display = "none";
+  return uploadedUrls;
+}
+
 window.saveProduct = async function() {
   const id = document.getElementById("prodId").value;
   const name = document.getElementById("prodName").value.trim();
@@ -934,13 +1011,19 @@ window.saveProduct = async function() {
   const price = parseFloat(document.getElementById("prodPrice").value);
   const mrp = parseFloat(document.getElementById("prodMrp").value) || 0;
   const stock = parseInt(document.getElementById("prodStock").value) || 0;
-  const images = document.getElementById("prodImages").value.split(",").map(s => s.trim()).filter(Boolean);
+  const urlImages = document.getElementById("prodImages").value.split(",").map(s => s.trim()).filter(Boolean);
   const description = document.getElementById("prodDesc").value.trim();
   const msgBox = document.getElementById("productMsg");
+  const saveBtn = document.querySelector('#productOverlay .btn-primary.btn-block');
 
   if (!name || !price) { showMsg(msgBox, "Naam aur price zaroori hai.", "error"); return; }
 
   try {
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Save ho raha hai...";
+    const uploadedUrls = pendingImageFiles.length ? await uploadPendingImages() : [];
+    const images = [...currentProductImages, ...uploadedUrls, ...urlImages];
+
     const data = { name, category, price, mrp, stock, images, description };
     if (id) {
       await updateDoc(doc(db, "products", id), data);
@@ -950,9 +1033,14 @@ window.saveProduct = async function() {
       await addDoc(collection(db, "products"), data);
       showToast("Naya product add ho gaya!");
     }
+    pendingImageFiles = [];
+    currentProductImages = [];
     closeModal("productOverlay");
   } catch (e) {
     showMsg(msgBox, "Error: " + e.message, "error");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Save Product";
   }
 };
 window.deleteProduct = async function(id) {

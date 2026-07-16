@@ -440,7 +440,7 @@
       <div class="form-group"><label>Stock (quantity)</label><input type="number" id="prodStock"></div>
     </div>
     <div class="form-group">
-      <label>Product Photos (apne device se upload karein, multiple select kar sakte hain)</label>
+      <label>Product Photos (apne device se upload karein, max 5 photos)</label>
       <input type="file" id="prodImageFiles" accept="image/*" multiple onchange="handleFileSelect(event)">
       <div id="imagePreviewWrap" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;"></div>
       <div id="uploadProgressMsg" style="font-size:12px;color:#1f7ae0;margin-top:6px;display:none;"></div>
@@ -475,9 +475,6 @@ import {
   getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc,
   getDoc, getDocs, onSnapshot, query, where, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import {
-  getStorage, ref, uploadBytes, getDownloadURL, deleteObject
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 /* =========================================================
    YAHA APNI FIREBASE PROJECT KI CONFIG DAALEIN
@@ -496,7 +493,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const storage = getStorage(app);
+
 
 const ADMIN_EMAIL = "pinkuchhimpa@gmail.com";
 const ADMIN_PASSWORD = "pinku@chhimpa";
@@ -763,11 +760,14 @@ function renderProductGrid() {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><div class="big">📦</div>Abhi koi product available nahi hai.</div>`;
     return;
   }
-  grid.innerHTML = list.map(p => {
-    const img = (p.images && p.images[0]) || "";
-    const disc = p.mrp && p.mrp > p.price ? Math.round(100 - (p.price / p.mrp) * 100) : 0;
-    const inStock = (p.stock || 0) > 0;
-    return `
+  grid.innerHTML = list.map(p => productCardHtml(p)).join("");
+}
+
+function productCardHtml(p) {
+  const img = (p.images && p.images[0]) || "";
+  const disc = p.mrp && p.mrp > p.price ? Math.round(100 - (p.price / p.mrp) * 100) : 0;
+  const inStock = (p.stock || 0) > 0;
+  return `
     <div class="p-card">
       <div class="p-img" onclick="viewProductDetail('${p.id}')">${img ? `<img src="${img}" alt="${escapeHtml(p.name)}">` : "🛍️"}</div>
       <div class="p-name" onclick="viewProductDetail('${p.id}')">${escapeHtml(p.name)}</div>
@@ -780,13 +780,22 @@ function renderProductGrid() {
       <div class="p-stock ${inStock ? "in" : "out"}">${inStock ? "In Stock" : "Out of Stock"}</div>
       <button class="btn btn-primary btn-block" ${inStock ? "" : "disabled"} onclick="addToCart('${p.id}')">Cart me Add Karein</button>
     </div>`;
-  }).join("");
 }
 
 window.viewProductDetail = function(id) {
   const p = allProducts.find(x => x.id === id);
   if (!p) return;
   const imgs = p.images && p.images.length ? p.images : [""];
+
+  let related = allProducts.filter(x => x.id !== p.id && x.category && x.category === p.category);
+  if (related.length === 0) related = allProducts.filter(x => x.id !== p.id);
+  related = related.slice(0, 6);
+  const relatedHtml = related.length ? `
+    <div style="margin-top:26px;border-top:1px solid #eee;padding-top:16px;">
+      <div class="section-title" style="margin:0 0 12px;font-size:16px;">Related Products</div>
+      <div class="product-grid">${related.map(r => productCardHtml(r)).join("")}</div>
+    </div>` : "";
+
   document.getElementById("productDetailBody").innerHTML = `
     <div style="display:flex;gap:20px;flex-wrap:wrap;">
       <div style="flex:1;min-width:240px;">
@@ -802,7 +811,8 @@ window.viewProductDetail = function(id) {
         <p style="font-size:13px;color:#555;margin:14px 0;line-height:1.6;">${escapeHtml(p.description || "")}</p>
         <button class="btn btn-primary" ${(p.stock||0)>0 ? "" : "disabled"} onclick="addToCart('${p.id}');closeModal('productDetailOverlay')">Cart me Add Karein</button>
       </div>
-    </div>`;
+    </div>
+    ${relatedHtml}`;
   openModal("productDetailOverlay");
 };
 
@@ -961,14 +971,13 @@ function statusLabel(s) {
 
 
 /* ================= ADMIN: PRODUCTS ================= */
-let currentProductImages = [];   // already-uploaded image URLs (existing, for edit mode)
-let pendingImageFiles = [];      // new files selected by admin, not yet uploaded
+let currentProductImages = [];   // image data (base64) or URLs, shown/edited live
+const MAX_IMAGES = 5;
 
 window.openProductModal = function(id) {
   document.getElementById("productMsg").style.display = "none";
   document.getElementById("prodId").value = id || "";
   document.getElementById("prodImageFiles").value = "";
-  pendingImageFiles = [];
   if (id) {
     const p = allProducts.find(x => x.id === id);
     document.getElementById("productModalTitle").textContent = "Product Edit Karein";
@@ -989,17 +998,50 @@ window.openProductModal = function(id) {
   openModal("productOverlay");
 };
 
-window.handleFileSelect = function(event) {
+/* Compress an image file in the browser and turn it into a small base64 string,
+   so it can be saved straight into Firestore (no Firebase Storage / Blaze plan needed) */
+function compressImageFile(file, maxWidth = 800, quality = 0.65) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (w > maxWidth) { h = Math.round(h * (maxWidth / w)); w = maxWidth; }
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => reject(new Error("Image load fail ho gayi"));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error("File read fail ho gayi"));
+    reader.readAsDataURL(file);
+  });
+}
+
+window.handleFileSelect = async function(event) {
   const files = Array.from(event.target.files);
-  const maxSizeMB = 3;
+  const progressBox = document.getElementById("uploadProgressMsg");
   for (const f of files) {
-    if (f.size > maxSizeMB * 1024 * 1024) {
-      showToast(f.name + " bahut badi file hai (max " + maxSizeMB + "MB).");
-      continue;
+    if (currentProductImages.length >= MAX_IMAGES) {
+      showToast("Maximum " + MAX_IMAGES + " photos hi add kar sakte hain.");
+      break;
     }
-    pendingImageFiles.push(f);
+    if (!f.type.startsWith("image/")) { showToast(f.name + " ek image file nahi hai."); continue; }
+    try {
+      progressBox.style.display = "block";
+      progressBox.textContent = "Photo process ho rahi hai: " + f.name;
+      const compressed = await compressImageFile(f);
+      currentProductImages.push(compressed);
+      renderImagePreview();
+    } catch (err) {
+      showToast("Photo process karne me error: " + err.message);
+    }
   }
-  renderImagePreview();
+  progressBox.style.display = "none";
+  event.target.value = "";
 };
 
 function renderImagePreview() {
@@ -1011,41 +1053,12 @@ function renderImagePreview() {
       <span onclick="removeExistingImage(${idx})" style="position:absolute;top:-6px;right:-6px;background:#e53e3e;color:#fff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;">&times;</span>
     </div>`;
   });
-  pendingImageFiles.forEach((file, idx) => {
-    const url = URL.createObjectURL(file);
-    html += `<div style="position:relative;width:70px;height:70px;">
-      <img src="${url}" style="width:70px;height:70px;object-fit:cover;border-radius:6px;border:2px solid #1f7ae0;">
-      <span onclick="removePendingImage(${idx})" style="position:absolute;top:-6px;right:-6px;background:#e53e3e;color:#fff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;">&times;</span>
-      <span style="position:absolute;bottom:0;left:0;right:0;background:rgba(31,122,224,.85);color:#fff;font-size:9px;text-align:center;">Naya</span>
-    </div>`;
-  });
   wrap.innerHTML = html || `<div style="font-size:12px;color:#999;">Koi photo select nahi ki hai.</div>`;
 }
 window.removeExistingImage = function(idx) {
   currentProductImages.splice(idx, 1);
   renderImagePreview();
 };
-window.removePendingImage = function(idx) {
-  pendingImageFiles.splice(idx, 1);
-  renderImagePreview();
-};
-
-async function uploadPendingImages() {
-  const progressBox = document.getElementById("uploadProgressMsg");
-  const uploadedUrls = [];
-  for (let i = 0; i < pendingImageFiles.length; i++) {
-    const file = pendingImageFiles[i];
-    progressBox.style.display = "block";
-    progressBox.textContent = `Photo upload ho rahi hai... (${i + 1}/${pendingImageFiles.length})`;
-    const path = "products/" + Date.now() + "_" + i + "_" + file.name.replace(/[^a-zA-Z0-9.]/g, "_");
-    const storageRef = ref(storage, path);
-    await uploadBytes(storageRef, file);
-    const url = await getDownloadURL(storageRef);
-    uploadedUrls.push(url);
-  }
-  progressBox.style.display = "none";
-  return uploadedUrls;
-}
 
 window.saveProduct = async function() {
   const id = document.getElementById("prodId").value;
@@ -1061,12 +1074,16 @@ window.saveProduct = async function() {
 
   if (!name || !price) { showMsg(msgBox, "Naam aur price zaroori hai.", "error"); return; }
 
+  const images = [...currentProductImages, ...urlImages];
+  const approxSizeKB = Math.round(images.join("").length / 1024);
+  if (approxSizeKB > 900) {
+    showMsg(msgBox, "Photos ka total size bahut zyada hai (" + approxSizeKB + "KB). Kuch photos hata dein ya kam quality wali chunein.", "error");
+    return;
+  }
+
   try {
     saveBtn.disabled = true;
     saveBtn.textContent = "Save ho raha hai...";
-    const uploadedUrls = pendingImageFiles.length ? await uploadPendingImages() : [];
-    const images = [...currentProductImages, ...uploadedUrls, ...urlImages];
-
     const data = { name, category, price, mrp, stock, images, description };
     if (id) {
       await updateDoc(doc(db, "products", id), data);
@@ -1076,7 +1093,6 @@ window.saveProduct = async function() {
       await addDoc(collection(db, "products"), data);
       showToast("Naya product add ho gaya!");
     }
-    pendingImageFiles = [];
     currentProductImages = [];
     closeModal("productOverlay");
   } catch (e) {
